@@ -43,7 +43,8 @@ If any of these fail, tell the user what's missing and stop — don't fake a rev
  1. STAGE              Inspect the working tree. Decide what belongs in this review unit.
  2. COMMIT             Conventional-commit message stating WHAT changed and WHY.
  3. PRE-REVIEW         Spawn a reviewer subagent on the diff with no other context;
-                       triage findings; fix locally. Skip for ≤50 LOC or pure docs.
+                       triage findings; fix locally. Skip only for tiny mechanical
+                       or pure-docs changes — see §3 for the precise rule.
  4. PUSH               Feature branch (never main/master directly).
  5. PR                 Open new, or update existing for the branch.
  6. BRIEF              Post a structured @codex comment (see template — 3-5 Concerns required).
@@ -118,8 +119,10 @@ Here is the diff:
 **When to skip PRE-REVIEW.** The fixed cost of one subagent invocation dominates for tiny diffs. Skip for:
 
 - Pure docs (`.md`, `.rst`, `.txt`) or pure config (`.yml`, `.toml`, `.json`) changes
-- ≤50 LOC and the change is mechanical (rename, single-line fix, type annotation tightening)
+- ≤50 LOC **and** the change is mechanical (rename, single-line fix, type annotation tightening)
 - Throwaway scratch work explicitly marked experimental
+
+**Never-skip carve-out.** Even if the diff matches a skip criterion above, do NOT skip PRE-REVIEW when the change touches **auth, serialization, data storage, or anything with security or correctness invariants that can fail silently**. Those categories punish missed edge cases out of proportion to their LOC count; the subagent's 30-60 sec is cheap insurance.
 
 **Anti-patterns:**
 
@@ -185,9 +188,12 @@ gh pr comment <PR_NUM> --body-file <(cat <<'EOF'
 - `path/to/file1.py` — <one-line summary>
 - `path/to/file2.ts` — <one-line summary>
 
-## Concerns / things I'm unsure about
-- <specific concern 1, ideally with file:line>
-- <specific concern 2>
+## Concerns / things I'm unsure about  (REQUIRED — 3 to 5 bullets)
+- <specific concern 1, with file:line>
+- <specific concern 2, with file:line>
+- <specific concern 3>
+- <(4th if warranted)>
+- <(5th if warranted)>
 
 ## Out of scope
 <what this PR explicitly does NOT touch>
@@ -302,6 +308,7 @@ The full template with rationale lives at `references/codex-briefing-template.md
 | Polling in-process with bash sleep loops | Burns agent context; dies if session ends | Background the wait script; agent gets notified on exit |
 | Skipping PRE-REVIEW because "Codex will catch it" | Defeats the point — you wanted to save the entire Codex round, not just the time-to-fix | Run a reviewer subagent on the diff before pushing; ~30-60s cost vs. one Codex round saved |
 | Sub-3 bullets in Concerns section | Codex defaults to find-bugs mode and round-count rises | Sit with the diff another five minutes; find three real uncertainties to surface |
+| >5 bullets in Concerns section | Design intent too foggy; review will fragment across too many uncertainties | Defer the review and do a design pass first; come back when unknowns are bounded |
 
 ## Red flags — stop and reconsider
 
