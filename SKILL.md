@@ -323,3 +323,5 @@ The full template with rationale lives at `references/codex-briefing-template.md
 ## Why this skill exists (the meta-point)
 
 Code review is not bureaucracy. Every untouched bug compounds; every review-shaped conversation surfaces an assumption that would otherwise have ossified. Codex is fast, cheap, available, and operating-context-aware in a way no human reviewer can match for routine work. The cost of consulting it is seconds; the cost of not consulting it is the bugs that ship. Use it.
+
+<!-- pr-agent smoke test 2026-05-15 — delete after validation -->
