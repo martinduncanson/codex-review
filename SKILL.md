@@ -1,0 +1,263 @@
+---
+name: codex-review
+description: Use whenever code is written, refactored, or fixed in any repository — at logical checkpoints (feature/fix complete, ~300 LOC since last review, end of working session, before opening or merging a PR). Commits the work, pushes, opens or updates a PR, posts a structured review request tagging @codex (the GitHub-integrated Codex bot), polls for the reply, and iterates with the agent on findings until the review is clean. Trigger on phrases like "I've finished implementing X", "let's commit this", "ready for review", "before I merge", or after writing/editing source files (.py/.ts/.js/.go/.rs/.rb/.java/.php/.cs etc). Skip for pure docs (.md only), throwaway scratch, or repos without the Codex GitHub app installed.
+---
+
+# Codex Review
+
+## Overview
+
+Every code-bearing change passes through Codex via GitHub before merge. The skill bundles the mechanics so the agent never has to improvise, and so the review request always carries enough context for Codex to be useful. The discipline is the point — undisciplined check-ins ("eh, looks fine") accumulate into the kind of drift that takes a week to unpick later.
+
+**The non-obvious part most agents get wrong:** Codex's review quality scales with the *briefing*, not with the diff. A 200-line diff with three sentences of context produces a generic review. The same diff with a clear `Goal / Approach / Concerns / Out-of-scope` brief produces a substantive review that catches real bugs.
+
+## When to invoke
+
+Invoke at any of these checkpoints — whichever comes first:
+
+- A logical unit of work is complete (feature implemented, bug fixed, refactor finished)
+- ~300 lines of code changed since the last review
+- End of a working session, before stopping
+- Before opening a PR for human merge
+- After Codex's previous review came back clean and a new round of changes is ready
+
+**Do not invoke for:**
+
+- Pure docs (`.md`, `.rst`, `.txt`) or pure config (`.yml`, `.toml`, `.json`) with no code change
+- Throwaway scratch work the user has explicitly marked as experimental
+- Repositories where the Codex GitHub app is not installed (the tag is a no-op)
+
+## Prerequisites
+
+Before invoking the skill the first time in a new repo, confirm:
+
+1. `gh auth status` reports authenticated and has access to the repo
+2. The Codex GitHub app is installed on the repo (visible at `https://github.com/<owner>/<repo>/settings/installations`)
+3. There is a remote (`git remote -v` returns at least one)
+
+If any of these fail, tell the user what's missing and stop — don't fake a review.
+
+## Workflow
+
+```
+1. STAGE              Inspect the working tree. Decide what belongs in this review unit.
+2. COMMIT             Conventional-commit message stating WHAT changed and WHY.
+3. PUSH               Feature branch (never main/master directly).
+4. PR                 Open new, or update existing for the branch.
+5. BRIEF              Post a structured @codex comment (see template).
+6. WAIT               Background `scripts/wait-for-codex.py`; agent notified on exit.
+7. TRIAGE             Parse findings. Decide accept / refactor / push back per item.
+8. ITERATE            Apply changes -> commit -> push -> re-tag @codex -> re-wait.
+9. CLOSE              Once the review pass is clean, mark complete in conversation.
+```
+
+### 1. STAGE
+
+```bash
+git status -sb
+git diff --stat
+git diff   # the actual content if not already obvious from the session
+```
+
+Group changes into a coherent review unit. If the working tree mixes a feature change and an unrelated drive-by fix, split them into two commits — Codex reviews much better when each commit has one clear intent. If the user has explicitly said "ship it all together," follow that instruction.
+
+### 2. COMMIT
+
+Use a conventional-commit message. Lead the body with **why**, not what — the diff already shows what.
+
+```
+feat(auth): redirect to /login when JWT decode fails
+
+Previously a malformed token threw a 500 because the middleware assumed
+verify() never returned null. We now treat decode failure the same as
+"no token present" so the user gets the login page instead of a stack
+trace. Bug surfaced in #482.
+```
+
+Stage specific files (not `git add -A`) to avoid sweeping in `.env`, build artifacts, or unrelated edits.
+
+### 3. PUSH
+
+If the branch is `main` or `master`, create a feature branch first — never push direct review work to a default branch.
+
+```bash
+# If on main/master:
+git switch -c <type>/<short-slug>   # e.g. fix/jwt-decode-redirect
+
+git push -u origin HEAD
+```
+
+### 4. PR — open or update
+
+Detect whether a PR already exists for the branch:
+
+```bash
+gh pr view --json number,url,state -q '.number' 2>/dev/null
+```
+
+If none exists, open one with a description that mirrors the brief structure (Codex will read the PR body too):
+
+```bash
+gh pr create --fill-first --body-file <(cat <<'EOF'
+## Goal
+<one sentence>
+
+## Approach
+<2-4 bullets>
+
+## Out of scope
+<what this PR explicitly does NOT touch>
+EOF
+)
+```
+
+If a PR exists, the new commits are already attached — proceed to BRIEF.
+
+### 5. BRIEF — tag @codex with structured context
+
+The template lives at `references/codex-briefing-template.md` — read it now if this is the first invocation. The template explains *why* each section earns better reviews.
+
+Post the brief as a fresh PR comment (not a review comment, not the PR body — comments are what Codex polls):
+
+```bash
+gh pr comment <PR_NUM> --body-file <(cat <<'EOF'
+@codex please review.
+
+## Goal
+<one sentence — user-visible problem this solves>
+
+## Approach
+- <design choice + why this over the obvious alternative>
+- <any non-trivial decision worth flagging>
+
+## Scope of this commit
+- `path/to/file1.py` — <one-line summary>
+- `path/to/file2.ts` — <one-line summary>
+
+## Concerns / things I'm unsure about
+- <specific concern 1, ideally with file:line>
+- <specific concern 2>
+
+## Out of scope
+<what this PR explicitly does NOT touch>
+EOF
+)
+```
+
+**Why each section earns its keep:** see the briefing template for the full reasoning. In short: Goal sets evaluation criteria; Approach explains design intent so Codex doesn't waste tokens questioning settled decisions; Concerns directs the review toward the parts you actually want a second pair of eyes on; Out-of-scope prevents Codex from raising "you should also fix X" noise.
+
+### 6. WAIT
+
+Codex usually replies in 5-10 minutes, occasionally faster, occasionally up to 20-30 min under load. Do NOT use an in-process bash poll on `gh pr view --json comments` — that approach has two failure modes confirmed in the field:
+
+1. **Wrong surface.** Codex posts as a **pull-request review** by `chatgpt-codex-connector[bot]`, not as an issue comment. `gh pr view --json comments` only returns issue comments, so the bash loop never sees Codex's reply and times out at 5 minutes even though Codex answered at minute 7.
+2. **In-process polling burns context** and dies when the agent session ends. Spawn the wait as a background process and let it notify the agent on exit instead.
+
+Use `scripts/wait-for-codex.py` — it probes three surfaces at once (PR reviews, issue comments, GitHub notifications inbox) and matches any author login containing `codex` (case-insensitive). It also re-pings @codex at a configurable interval if Codex has gone silent, so a single transient miss doesn't strand the review.
+
+```bash
+# Record the briefing timestamp first so we don't match an older Codex reply.
+BRIEFING_TS="$(gh api repos/<owner>/<repo>/issues/<PR>/comments \
+  --jq '.[-1].created_at')"
+
+python "$HOME/.claude/skills/codex-review/scripts/wait-for-codex.py" \
+  --pr <PR> \
+  --repo <owner>/<repo> \
+  --since "$BRIEFING_TS"
+```
+
+Run this **in the background** (e.g. via your environment's background-process facility — `run_in_background=true` for the Bash tool in Claude Code) so the agent is notified on exit instead of blocking the conversation. The script writes JSON to stdout on success with `kind`, `author`, `body`, `ts`, `url`. Exit codes:
+
+| Exit | Meaning | Action |
+|---|---|---|
+| 0 | Codex posted a review or comment | Read the body, TRIAGE |
+| 2 | Timeout (default 90min) reached with no Codex reply | Surface to user; check that the Codex GitHub app is actually installed on the repo; consider whether usage is exhausted and rescheduling is right |
+| 3 | Codex reacted 👍 (no findings) | This is Codex's "looks good" signal — proceed to CLOSE |
+
+**Why the three-surface probe matters.** GitHub doesn't have a single feed that captures every shape of Codex output. The reviews endpoint is where the actual feedback lands; the comments endpoint catches the rare cases where Codex posts an issue comment instead (e.g. for very short responses); the notifications inbox is a useful liveness signal (it confirms *something* happened on the PR even if you haven't found it on the content endpoints yet, which can speed up the next probe). The wait script unifies all three; never go back to single-surface polling.
+
+**Why we don't sleep in-process.** The skill used to recommend a 5-minute cap on in-process polling, which turned out to be far too short — Codex frequently takes 7-15 minutes, and the agent would time out, abandon the wait, and either move on (missing real findings) or sit silently for hours (operator confusion). Background process + exit notification is the right pattern: no context burn while waiting, and the agent picks up the result the moment Codex actually replies.
+
+**Tuning knobs:**
+- `--timeout-seconds` (default 5400 = 90min) — total ceiling. Bump up if you know Codex is rate-limited.
+- `--poll-interval-seconds` (default 30) — between probes. Don't go below 30s; Codex doesn't reply faster than that.
+- `--reping-after-seconds` (default 1800 = 30min) — re-ping `@codex` after this much silence. Set to 0 to disable.
+- `--max-repings` (default 2) — re-ping budget. Two re-pings + the original = three total nudges across 90min.
+
+**Failure mode: usage exhausted.** If Codex never replies and you've burned the re-ping budget, the most likely cause is Codex's own quota/availability, not your PR. Surface this to the user with the PR URL and the exit code; do not silently retry. The operator may want to wait 24h and re-tag manually.
+
+### 7. TRIAGE
+
+Read Codex's reply carefully. For each finding, classify into:
+
+| Class | Action |
+|---|---|
+| **Real bug** | Fix it. No debate. |
+| **Real improvement** | Fix it unless it's clearly out-of-scope for this PR — in which case file an issue and reference it in the next brief. |
+| **Stylistic preference** | Apply if it aligns with the project; push back politely if it doesn't. Codex isn't always right about local conventions. |
+| **Misunderstanding** | Reply in-thread explaining the actual constraint. Don't blindly "fix" something that wasn't broken. |
+| **False positive** | Reply briefly explaining why, so the next round doesn't repeat the suggestion. |
+
+Don't accept findings just to make Codex stop. If a suggestion is wrong, say so — with reasoning. The point is correct code, not Codex-pleasing code.
+
+### 8. ITERATE
+
+Apply accepted fixes:
+
+```bash
+# make changes, then:
+git add -p
+git commit -m "fix(<scope>): <one-line — what changed and why>"
+git push
+gh pr comment <PR_NUM> --body "@codex re-review. Addressed: <bulleted summary of what changed since last review>. Skipped: <briefly note anything intentionally not changed and why>."
+```
+
+Re-wait using the same `wait-for-codex.py` script, with `--since` set to **the timestamp of your re-ping comment** (not the original briefing). This way the script only matches Codex replies posted after your latest comment, not the previous-round review:
+
+```bash
+REPING_TS="$(gh api repos/<owner>/<repo>/issues/<PR>/comments \
+  --jq '.[-1].created_at')"
+
+python "$HOME/.claude/skills/codex-review/scripts/wait-for-codex.py" \
+  --pr <PR> --repo <owner>/<repo> --since "$REPING_TS"
+```
+
+Iterate until either:
+- Codex's reply contains no actionable findings (the standard "looks good" / "no issues" / 👍-reaction signal), or
+- The user explicitly tells you to stop iterating
+
+**Loop budget:** if you're on round 4+, something is wrong — pause and ask the user. Either the change is too large for review (split it), the brief is missing context Codex keeps re-flagging, or there's a genuine disagreement that needs human judgment.
+
+### 9. CLOSE
+
+Tell the user the review is clean and what was changed across rounds. Do not auto-merge — merging is a human decision. Leave the PR open and ready.
+
+## Briefing template
+
+The full template with rationale lives at `references/codex-briefing-template.md`. Read it the first time you use this skill in a session. It explains the why behind each section and shows good vs. weak examples.
+
+## Common mistakes
+
+| Mistake | Why it's bad | Do this instead |
+|---|---|---|
+| Tagging `@codex` with just "please review" | No context = generic review = no real value | Use the structured brief; concerns section is the highest-leverage part |
+| Bundling unrelated changes in one PR | Codex's review surface explodes; findings get muddled | One coherent unit per review; split if needed |
+| Accepting every finding without thought | Drift toward Codex-pleasing rather than correct code | Triage first; push back on false positives |
+| Posting brief as PR description, then never commenting | Codex polls comments, not always the body | Comment is the canonical signal |
+| Skipping the brief on the second round | Codex loses thread context | Always summarise what changed and why on re-review |
+| Re-tagging after every tiny commit | Wastes review cycles | Batch commits into a logical unit, then re-tag once |
+| Polling `gh pr view --json comments` for a Codex reply | Codex posts as a **review** (`chatgpt-codex-connector[bot]`), not a comment — your loop never sees the reply | Use `scripts/wait-for-codex.py` which probes reviews + comments + notifications |
+| Capping wait at 5 minutes | Codex frequently takes 7-15 min, longer under load — early timeout abandons real reviews | Use the wait script's 90-min default; the operator can override |
+| Polling in-process with bash sleep loops | Burns agent context; dies if session ends | Background the wait script; agent gets notified on exit |
+
+## Red flags — stop and reconsider
+
+- About to push to `main` or `master` directly → branch first
+- Brief contains no "Concerns" section → you're not asking for what you actually need reviewed
+- Diff is 1000+ lines → too large for one review; split
+- 4+ iteration rounds on the same PR → escalate to user
+- Codex keeps suggesting the same fix you've explained twice → fix the explanation in the next brief, or accept and move on
+
+## Why this skill exists (the meta-point)
+
+Code review is not bureaucracy. Every untouched bug compounds; every review-shaped conversation surfaces an assumption that would otherwise have ossified. Codex is fast, cheap, available, and operating-context-aware in a way no human reviewer can match for routine work. The cost of consulting it is seconds; the cost of not consulting it is the bugs that ship. Use it.
