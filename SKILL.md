@@ -40,16 +40,20 @@ If any of these fail, tell the user what's missing and stop — don't fake a rev
 ## Workflow
 
 ```
-1. STAGE              Inspect the working tree. Decide what belongs in this review unit.
-2. COMMIT             Conventional-commit message stating WHAT changed and WHY.
-3. PUSH               Feature branch (never main/master directly).
-4. PR                 Open new, or update existing for the branch.
-5. BRIEF              Post a structured @codex comment (see template).
-6. WAIT               Background `scripts/wait-for-codex.py`; agent notified on exit.
-7. TRIAGE             Parse findings. Decide accept / refactor / push back per item.
-8. ITERATE            Apply changes -> commit -> push -> re-tag @codex -> re-wait.
-9. CLOSE              Once the review pass is clean, mark complete in conversation.
+ 1. STAGE              Inspect the working tree. Decide what belongs in this review unit.
+ 2. COMMIT             Conventional-commit message stating WHAT changed and WHY.
+ 3. PRE-REVIEW         Spawn a reviewer subagent on the diff with no other context;
+                       triage findings; fix locally. Skip for ≤50 LOC or pure docs.
+ 4. PUSH               Feature branch (never main/master directly).
+ 5. PR                 Open new, or update existing for the branch.
+ 6. BRIEF              Post a structured @codex comment (see template — 3-5 Concerns required).
+ 7. WAIT               Background `scripts/wait-for-codex.py`; agent notified on exit.
+ 8. TRIAGE             Parse findings. Decide accept / refactor / push back per item.
+ 9. ITERATE            Apply changes -> commit -> push -> re-tag @codex -> re-wait.
+10. CLOSE              Once the review pass is clean, mark complete in conversation.
 ```
+
+**Why PRE-REVIEW exists.** Codex catches bugs the implementer didn't catch in self-review. A reviewer subagent run on the diff *before* pushing catches ~50% of what Codex would catch, locally, at ~30-60 sec wall-clock cost — saving one full Codex round (5-15 min + agent context). Combined with a substantive Concerns section (BRIEF step 6 references the template requirement), round-1-clean Codex reviews become the norm rather than the exception. The diff Codex sees is the diff that survived a self-review pass; Codex's job shifts from "find bugs" to "sanity-check the implementer's stated uncertainties".
 
 ### 1. STAGE
 
@@ -76,7 +80,54 @@ trace. Bug surfaced in #482.
 
 Stage specific files (not `git add -A`) to avoid sweeping in `.env`, build artifacts, or unrelated edits.
 
-### 3. PUSH
+### 3. PRE-REVIEW — spawn a reviewer subagent on the diff before pushing
+
+**The cheapest upstream layer.** Before pushing, spawn a code-reviewer subagent against the just-committed diff with no other context. The subagent's job is to find bugs, missed edge cases, and inconsistencies that the implementer (you) didn't catch through confirmation bias on their own work. Fix what it surfaces. THEN push.
+
+**Why this saves Codex rounds.** Codex catches roughly two categories of finding: (a) bugs the implementer didn't see, and (b) intentional design choices Codex questions. A pre-push self-review eats most of (a) before Codex ever runs. Combined with concerns-enumeration (step 6 BRIEF) eating most of (b), round-1-clean Codex reviews become the default.
+
+**Cost vs. value.** Subagent invocation: ~30-60 sec wall-clock + modest token cost. Saved: typically one Codex round = 5-15 min wall-clock + tokens + agent context retained across the wait + cognitive overhead of triage. Net win at any non-trivial PR size.
+
+**How to invoke.** Use whichever reviewer agent the host environment exposes. In Claude Code, `pr-review-toolkit:code-reviewer` and `coderabbit:code-review` are both fits; pick by preference (toolkit is local + fast; coderabbit calls out to an external service but is consistent across PRs). The prompt to the subagent must be:
+
+```
+You have no other context for this change. Review this diff for:
+  - bugs
+  - security issues
+  - missed edge cases
+  - inconsistencies with the apparent surrounding patterns
+  - missing tests for new behavior
+
+Do not flag stylistic preferences. Do not propose refactors that are out of
+scope for the diff. Cite each finding with file:line.
+
+Here is the diff:
+<paste the output of `git diff <base>...HEAD`>
+```
+
+**Triage the findings.**
+
+| Class | Action |
+|---|---|
+| **Real bug** | Fix locally before pushing. |
+| **Real edge case missed** | Fix locally; add a test if applicable. |
+| **Subagent misunderstood the intent** | Note it — it's a sign your Concerns bullets need to clarify intent. |
+| **Stylistic preference (you asked it not to flag these but it did)** | Ignore. |
+| **"Add a test for X"** where X is out-of-scope | Move to a follow-up issue, don't bloat this PR. |
+
+**When to skip PRE-REVIEW.** The fixed cost of one subagent invocation dominates for tiny diffs. Skip for:
+
+- Pure docs (`.md`, `.rst`, `.txt`) or pure config (`.yml`, `.toml`, `.json`) changes
+- ≤50 LOC and the change is mechanical (rename, single-line fix, type annotation tightening)
+- Throwaway scratch work explicitly marked experimental
+
+**Anti-patterns:**
+
+- Skipping PRE-REVIEW because "Codex will catch it" — that's the whole point of the cost/value math: catching it before Codex catches it saves the entire Codex round, not the time-to-fix-the-finding.
+- Asking the subagent to evaluate intent ("is this the right approach?") — that's what Codex with concerns-enumeration is for. PRE-REVIEW is for *bugs you didn't see in your own diff*, not for design ratification.
+- Dispatching multiple reviewer subagents to vote. One reviewer, one diff, one pass.
+
+### 4. PUSH
 
 If the branch is `main` or `master`, create a feature branch first — never push direct review work to a default branch.
 
@@ -87,7 +138,7 @@ git switch -c <type>/<short-slug>   # e.g. fix/jwt-decode-redirect
 git push -u origin HEAD
 ```
 
-### 4. PR — open or update
+### 5. PR — open or update
 
 Detect whether a PR already exists for the branch:
 
@@ -113,7 +164,7 @@ EOF
 
 If a PR exists, the new commits are already attached — proceed to BRIEF.
 
-### 5. BRIEF — tag @codex with structured context
+### 6. BRIEF — tag @codex with structured context
 
 The template lives at `references/codex-briefing-template.md` — read it now if this is the first invocation. The template explains *why* each section earns better reviews.
 
@@ -146,7 +197,7 @@ EOF
 
 **Why each section earns its keep:** see the briefing template for the full reasoning. In short: Goal sets evaluation criteria; Approach explains design intent so Codex doesn't waste tokens questioning settled decisions; Concerns directs the review toward the parts you actually want a second pair of eyes on; Out-of-scope prevents Codex from raising "you should also fix X" noise.
 
-### 6. WAIT
+### 7. WAIT
 
 Codex usually replies in 5-10 minutes, occasionally faster, occasionally up to 20-30 min under load. Do NOT use an in-process bash poll on `gh pr view --json comments` — that approach has two failure modes confirmed in the field:
 
@@ -186,7 +237,7 @@ Run this **in the background** (e.g. via your environment's background-process f
 
 **Failure mode: usage exhausted.** If Codex never replies and you've burned the re-ping budget, the most likely cause is Codex's own quota/availability, not your PR. Surface this to the user with the PR URL and the exit code; do not silently retry. The operator may want to wait 24h and re-tag manually.
 
-### 7. TRIAGE
+### 8. TRIAGE
 
 Read Codex's reply carefully. For each finding, classify into:
 
@@ -200,7 +251,7 @@ Read Codex's reply carefully. For each finding, classify into:
 
 Don't accept findings just to make Codex stop. If a suggestion is wrong, say so — with reasoning. The point is correct code, not Codex-pleasing code.
 
-### 8. ITERATE
+### 9. ITERATE
 
 Apply accepted fixes:
 
@@ -228,7 +279,7 @@ Iterate until either:
 
 **Loop budget:** if you're on round 4+, something is wrong — pause and ask the user. Either the change is too large for review (split it), the brief is missing context Codex keeps re-flagging, or there's a genuine disagreement that needs human judgment.
 
-### 9. CLOSE
+### 10. CLOSE
 
 Tell the user the review is clean and what was changed across rounds. Do not auto-merge — merging is a human decision. Leave the PR open and ready.
 
@@ -249,11 +300,15 @@ The full template with rationale lives at `references/codex-briefing-template.md
 | Polling `gh pr view --json comments` for a Codex reply | Codex posts as a **review** (`chatgpt-codex-connector[bot]`), not a comment — your loop never sees the reply | Use `scripts/wait-for-codex.py` which probes reviews + comments + notifications |
 | Capping wait at 5 minutes | Codex frequently takes 7-15 min, longer under load — early timeout abandons real reviews | Use the wait script's 90-min default; the operator can override |
 | Polling in-process with bash sleep loops | Burns agent context; dies if session ends | Background the wait script; agent gets notified on exit |
+| Skipping PRE-REVIEW because "Codex will catch it" | Defeats the point — you wanted to save the entire Codex round, not just the time-to-fix | Run a reviewer subagent on the diff before pushing; ~30-60s cost vs. one Codex round saved |
+| Sub-3 bullets in Concerns section | Codex defaults to find-bugs mode and round-count rises | Sit with the diff another five minutes; find three real uncertainties to surface |
 
 ## Red flags — stop and reconsider
 
 - About to push to `main` or `master` directly → branch first
-- Brief contains no "Concerns" section → you're not asking for what you actually need reviewed
+- Skipped PRE-REVIEW for a diff >50 LOC or anything touching auth/data/serialization → run the reviewer subagent before pushing
+- Brief Concerns section has fewer than 3 bullets, or "I'm not sure if this is right" without a file:line → you haven't audited yourself enough
+- Brief Concerns section has more than 5 bullets → design intent too foggy; defer the review and do a design pass
 - Diff is 1000+ lines → too large for one review; split
 - 4+ iteration rounds on the same PR → escalate to user
 - Codex keeps suggesting the same fix you've explained twice → fix the explanation in the next brief, or accept and move on
