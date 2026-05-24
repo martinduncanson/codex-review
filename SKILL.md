@@ -101,6 +101,8 @@ Stage specific files (not `git add -A`) to avoid sweeping in `.env`, build artif
 
 **Dispatch in parallel when multiple specialists match** — they're independent passes against the same diff. The synthesis step (below) reconciles findings before you act.
 
+**Fallback when specialists are unavailable.** Some host environments expose only `coderabbit:code-review` and not `pr-review-toolkit:*`. If a matched specialist isn't reachable, fall back to the generic reviewer alone and **note the skipped specialist in the synthesis step / PR description** — so the operator knows the specialist lens wasn't applied. Don't silently downgrade; surface the gap. Never block on unreachable specialists.
+
 **The prompt to each subagent must be:**
 
 ```
@@ -120,7 +122,7 @@ Here is the diff:
 
 Specialists may interpret their own remit through the prompt — `silent-failure-hunter` will naturally focus on error-handling shapes regardless of the generic prompt; that's the intent.
 
-**Synthesis step (when more than one specialist fires).** After all dispatched specialists return, read their reports, dedupe overlapping findings (the same line flagged by both `code-reviewer` and `silent-failure-hunter`), rank by severity, then triage per the table below. Don't act on each report in isolation — that's how operator context gets shredded by 5 parallel reviews.
+**Synthesis step (whenever any specialist fires alongside the baseline reviewer).** After all dispatched reviewers return, read their reports, dedupe overlapping findings (the same line flagged by both `code-reviewer` and `silent-failure-hunter`), rank by severity, then triage per the table below. The baseline generic reviewer ALWAYS runs, so synthesis triggers whenever even one specialist also fires — duplicates between baseline + specialist are the most common case, not the multi-specialist scenario. Don't act on each report in isolation — that's how operator context gets shredded by 5 parallel reviews.
 
 **Triage the findings.**
 
