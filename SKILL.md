@@ -89,7 +89,21 @@ Stage specific files (not `git add -A`) to avoid sweeping in `.env`, build artif
 
 **Cost vs. value.** Subagent invocation: ~30-60 sec wall-clock + modest token cost. Saved: typically one Codex round = 5-15 min wall-clock + tokens + agent context retained across the wait + cognitive overhead of triage. Net win at any non-trivial PR size.
 
-**How to invoke.** Use whichever reviewer agent the host environment exposes. In Claude Code, `pr-review-toolkit:code-reviewer` and `coderabbit:code-review` are both fits; pick by preference (toolkit is local + fast; coderabbit calls out to an external service but is consistent across PRs). The prompt to the subagent must be:
+**How to invoke — heuristic specialist dispatch.** Always run the generic reviewer; ALSO dispatch specialists matching the diff shape. Specialists catch failure-class bugs the generic reviewer averages over.
+
+| Diff shape | Specialist to ALSO dispatch | Why |
+|---|---|---|
+| Always | `pr-review-toolkit:code-reviewer` (or `coderabbit:code-review`) | General quality / project-convention check; baseline |
+| Adds/modifies try/except/catch blocks, error returns, fallback branches | `pr-review-toolkit:silent-failure-hunter` | Silent-failure patterns require dedicated lens; generic reviewer often misses fail-open shapes (see install-gate skip-and-error memory) |
+| Introduces new types/dataclasses/interfaces/struct definitions | `pr-review-toolkit:type-design-analyzer` | Type design quality is invariant-shaped; generic reviewer focuses on bug-shaped findings |
+| Adds tests or modifies test files | `pr-review-toolkit:pr-test-analyzer` | Test coverage gaps and behavioural-vs-implementation testing distinctions need a specialist |
+| Adds substantial new comments/docstrings (>~10 lines of new commentary) | `pr-review-toolkit:comment-analyzer` | Comment rot and accuracy-vs-code drift are their own class |
+
+**Dispatch in parallel when multiple specialists match** — they're independent passes against the same diff. The synthesis step (below) reconciles findings before you act.
+
+**Fallback when specialists are unavailable.** Some host environments expose only `coderabbit:code-review` and not `pr-review-toolkit:*`. If a matched specialist isn't reachable, fall back to the generic reviewer alone and **note the skipped specialist in the synthesis step / PR description** — so the operator knows the specialist lens wasn't applied. Don't silently downgrade; surface the gap. Never block on unreachable specialists.
+
+**The prompt to each subagent must be:**
 
 ```
 You have no other context for this change. Review this diff for:
@@ -105,6 +119,10 @@ scope for the diff. Cite each finding with file:line.
 Here is the diff:
 <paste the output of `git diff <base>...HEAD`>
 ```
+
+Specialists may interpret their own remit through the prompt — `silent-failure-hunter` will naturally focus on error-handling shapes regardless of the generic prompt; that's the intent.
+
+**Synthesis step (whenever any specialist fires alongside the baseline reviewer).** After all dispatched reviewers return, read their reports, dedupe overlapping findings (the same line flagged by both `code-reviewer` and `silent-failure-hunter`), rank by severity, then triage per the table below. The baseline generic reviewer ALWAYS runs, so synthesis triggers whenever even one specialist also fires — duplicates between baseline + specialist are the most common case, not the multi-specialist scenario. Don't act on each report in isolation — that's how operator context gets shredded by 5 parallel reviews.
 
 **Triage the findings.**
 
@@ -128,7 +146,9 @@ Here is the diff:
 
 - Skipping PRE-REVIEW because "Codex will catch it" — that's the whole point of the cost/value math: catching it before Codex catches it saves the entire Codex round, not the time-to-fix-the-finding.
 - Asking the subagent to evaluate intent ("is this the right approach?") — that's what Codex with concerns-enumeration is for. PRE-REVIEW is for *bugs you didn't see in your own diff*, not for design ratification.
-- Dispatching multiple reviewer subagents to vote. One reviewer, one diff, one pass.
+- Dispatching specialists that don't match the diff shape (e.g. running `type-design-analyzer` on a pure logic fix). The heuristic dispatch matrix exists to avoid this — only fire specialists whose remit matches the diff.
+- Skipping the synthesis step whenever any specialist fires alongside the baseline reviewer. Baseline + 1 specialist is the most common case — duplicates between them are routine. Acting on each report in isolation produces duplicate work and shreds operator context. Always dedupe and rank first.
+- Dispatching every specialist on every diff "for completeness". The matrix is a filter, not a checklist. Five parallel reviews on a small diff is the anti-pattern this replaced.
 
 ### 4. PUSH
 
