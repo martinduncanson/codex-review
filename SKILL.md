@@ -147,7 +147,7 @@ Specialists may interpret their own remit through the prompt — `silent-failure
 - Skipping PRE-REVIEW because "Codex will catch it" — that's the whole point of the cost/value math: catching it before Codex catches it saves the entire Codex round, not the time-to-fix-the-finding.
 - Asking the subagent to evaluate intent ("is this the right approach?") — that's what Codex with concerns-enumeration is for. PRE-REVIEW is for *bugs you didn't see in your own diff*, not for design ratification.
 - Dispatching specialists that don't match the diff shape (e.g. running `type-design-analyzer` on a pure logic fix). The heuristic dispatch matrix exists to avoid this — only fire specialists whose remit matches the diff.
-- Skipping the synthesis step when multiple specialists fired. Acting on each report in isolation produces duplicate work and shreds operator context. Always dedupe and rank first.
+- Skipping the synthesis step whenever any specialist fires alongside the baseline reviewer. Baseline + 1 specialist is the most common case — duplicates between them are routine. Acting on each report in isolation produces duplicate work and shreds operator context. Always dedupe and rank first.
 - Dispatching every specialist on every diff "for completeness". The matrix is a filter, not a checklist. Five parallel reviews on a small diff is the anti-pattern this replaced.
 
 ### 4. PUSH
