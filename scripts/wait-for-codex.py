@@ -42,11 +42,27 @@ import sys
 import time
 from typing import Any
 
-# Authors that count as Codex. Case-insensitive substring match against login.
-# `chatgpt-codex-connector[bot]` is the live login as of 2026-05-13;
-# `codex[bot]` and `openai-codex` are conservative aliases against rename.
+# Authors that count as a reviewing bot. Case-insensitive substring match
+# against login. Order: Codex first (the named target), Gemini as the
+# documented fallback for when Codex is quota-exhausted or silent.
+#
+# - `chatgpt-codex-connector[bot]` — Codex live login as of 2026-05-13
+# - `codex[bot]` / `openai-codex` — conservative aliases against rename
+# - `gemini-code-assist[bot]` — Google's GitHub app; auto-fires on every PR
+#   in repos where it's installed (no @-mention required). Added 2026-05-28
+#   to make the Codex → Gemini fallback automatic in the skill.
 CODEX_LOGIN_PATTERNS = [
     re.compile(r"codex", re.IGNORECASE),
+    re.compile(r"gemini-code-assist", re.IGNORECASE),
+]
+
+# Bodies Codex emits when the operator's account is out of review quota.
+# The script still matches (the author is Codex; the comment is real), but
+# the caller needs to know exit-0 here means "quota-limited, not a clean
+# review" — so we tag the matched payload so callers can branch on it.
+QUOTA_LIMIT_PATTERNS = [
+    re.compile(r"usage limit", re.IGNORECASE),
+    re.compile(r"out of (?:review )?credits", re.IGNORECASE),
 ]
 
 
@@ -73,6 +89,15 @@ def is_codex(login: str | None) -> bool:
     if not login:
         return False
     return any(p.search(login) for p in CODEX_LOGIN_PATTERNS)
+
+
+def is_quota_limit(body: str | None) -> bool:
+    """Detect the Codex "you have reached your usage limit" body so callers can
+    branch on it. A quota-limit comment is structurally a review (author matches,
+    body is non-empty) but semantically isn't actionable feedback."""
+    if not body:
+        return False
+    return any(p.search(body) for p in QUOTA_LIMIT_PATTERNS)
 
 
 def parse_iso(ts: str | None) -> dt.datetime | None:
@@ -267,7 +292,20 @@ def main() -> int:
                 log(f"codex +1 reaction at {hit['ts']} (clean review)")
                 print(json.dumps(hit, indent=2))
                 return 3
-            log(f"codex {hit['kind']} from {hit['author']} at {hit['ts']}")
+            # Tag quota-limited Codex bodies so callers don't mistake exit-0 +
+            # quota-comment for a clean review. The script still returns 0
+            # (a real comment was matched), but the JSON payload carries a
+            # `quota_limited: true` flag so the caller branches into the
+            # Gemini fallback rather than triaging the quota comment as
+            # actionable feedback.
+            if is_quota_limit(hit.get("body")):
+                hit["quota_limited"] = True
+                log(
+                    f"codex {hit['kind']} from {hit['author']} at {hit['ts']} "
+                    "— QUOTA LIMIT body; check gemini-code-assist[bot] for the real review"
+                )
+            else:
+                log(f"codex {hit['kind']} from {hit['author']} at {hit['ts']}")
             print(json.dumps(hit, indent=2))
             return 0
 

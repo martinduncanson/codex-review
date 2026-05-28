@@ -263,6 +263,38 @@ Run this **in the background** (e.g. via your environment's background-process f
 
 **Failure mode: usage exhausted.** If Codex never replies and you've burned the re-ping budget, the most likely cause is Codex's own quota/availability, not your PR. Surface this to the user with the PR URL and the exit code; do not silently retry. The operator may want to wait 24h and re-tag manually.
 
+**Quota-limit signal vs silence.** Codex sometimes replies with a quota-limit *comment* by `chatgpt-codex-connector[bot]` (body contains `usage limits` and a link to the Codex usage dashboard) instead of going silent. `wait-for-codex.py` returns exit 0 with that comment as the matched body — it looks like a successful review at the script level but it isn't one. **Always check the matched body for the "usage limit" string before treating exit 0 as a clean review.** When you see the quota signal: skip to the Gemini fallback below; do not iterate against the quota-limit comment.
+
+### 7a. Gemini Code Assist fallback
+
+**Why this exists.** Codex's GitHub bot is gated by a separate ChatGPT-side quota that can exhaust without warning. Google's Gemini Code Assist GitHub app (`gemini-code-assist[bot]`) auto-fires on every PR in repos where it's installed — no mention or tag required, the review just appears within minutes of the PR opening. Confirmed working on `martinduncanson/agenticq` PR #16 / #17 (2026-05-28). Catches the same shape of findings as Codex: missing security gates, dead code, abort-signal correctness, test-state realism.
+
+**When to invoke the fallback.** Either:
+- Codex replied with the `usage limit` quota comment described above, or
+- `wait-for-codex.py` exits 2 (timeout) after re-pings exhausted AND you have evidence the Codex bot is healthy on other PRs in the same window (otherwise the silence is a transient probe miss, not quota).
+
+**How to check for a Gemini review.** Gemini posts as a PR review (not a comment), so the gh API path is `pulls/<n>/reviews` with `author.login == "gemini-code-assist"`:
+
+```bash
+gh api repos/<owner>/<repo>/pulls/<PR>/reviews \
+  --jq '.[] | select(.user.login == "gemini-code-assist[bot]")
+              | {id, state, submitted_at, body}'
+```
+
+For inline line-level comments (the actionable findings live here, not in the summary body):
+
+```bash
+gh api repos/<owner>/<repo>/pulls/<PR>/comments \
+  --jq '.[] | select(.user.login == "gemini-code-assist[bot]")
+              | {path, line, body}'
+```
+
+**How to verify Gemini is installed before relying on it.** Repos without the app installed will return zero reviews from `gemini-code-assist[bot]`. Confirm at `https://github.com/<owner>/<repo>/settings/installations` or by checking whether any prior PR has a `gemini-code-assist[bot]` review. If the app isn't installed and Codex is exhausted, surface to the operator — do not fake a review pass.
+
+**Triage Gemini findings exactly like Codex.** The TRIAGE table at §8 applies unchanged. The severity badges Gemini emits (`security-high`, `high`, `medium`, `low`) are useful first-pass sorting hints but don't override your own classification — Gemini sometimes flags `medium` for dead code that's genuinely harmless, and occasionally rates real security bypasses as `medium` rather than `high`. Read the body.
+
+**Skill update queued (2026-05-28).** `wait-for-codex.py` does not yet match `gemini-code-assist` author by default; a follow-up will rename/extend it so the bot dispatch is automatic instead of operator-driven. Until then, perform the Gemini check manually whenever the Codex signal is quota-limited or silent-with-evidence.
+
 ### 8. TRIAGE
 
 Read Codex's reply carefully. For each finding, classify into:
